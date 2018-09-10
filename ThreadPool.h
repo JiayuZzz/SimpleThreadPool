@@ -1,9 +1,9 @@
 //
-// Created by wujy on 18-8-31.
+// Created by wujy on 9/6/18.
 //
 
-#ifndef SIMPLE_THREADPOOL_H
-#define SIMPLE_THREADPOOL_H
+#ifndef LEVELDB_THREADPOOL_H
+#define LEVELDB_THREADPOOL_H
 
 #include <memory>
 #include <functional>
@@ -17,13 +17,65 @@
 class ThreadPool {
 public:
     //create a thread pool witch contains n worker threads
-    ThreadPool(int n);
+    ThreadPool(int n) {
+        for (int i = 0; i < n; i++) {
+            workers.emplace_back(
+                    //worker's execution
+                    [this] {
+                        std::function<void()> task;
+                        //until thread thread pool terminated
+                        while (true) {
 
-    ~ThreadPool();
+                            {
+                                std::unique_lock<std::mutex> lock(mu);
+                                //if task queue is not empty or thread pool has been terminated, continue
+                                //else wait for notifying
+                                while (tasks.empty() && !terminated) {
+                                    cond.wait(lock);
+                                }
+                                //if task queue is empty here, thread pool must have been terminated
+                                if (tasks.empty()) {
+                                    return;
+                                }
+                                task = std::move(tasks.front());
+                                tasks.pop();
+                            }
+                            task();
+                        }
+                    }
+            );
+        }
+    }
+
+    ~ThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(mu);
+            terminated = true;
+        }
+        cond.notify_all();
+        for (std::thread &w:workers) {
+            w.join();
+        }
+    }
 
     //add a task to queue, return a future struct witch contains the return value of the task
     template<class Func, class... Args>
-    auto addTask(Func &&func, Args &&... args) -> std::future<typename std::result_of<Func(Args...)>::type>;
+    auto addTask(Func &&func, Args &&... args) -> std::future<typename std::result_of<Func(Args...)>::type> {
+        //return type of func
+        using retType = typename std::result_of<Func(Args...)>::type;
+        auto task = std::make_shared<std::packaged_task<retType()>>
+                ((std::bind(std::forward<Func>(func), std::forward<Args>(args)...)));
+        //store result of task
+        std::future<retType> ret = task->get_future();
+
+        {
+            std::unique_lock<std::mutex> lock(mu);
+            //package task function to type void()
+            tasks.emplace([task] { (*task)(); });
+        }
+        cond.notify_one();
+        return ret;
+    }
 
 private:
 
@@ -39,64 +91,4 @@ private:
     bool terminated;
 };
 
-ThreadPool::ThreadPool(int n) {
-    for (int i = 0; i < n; i++) {
-        workers.emplace_back(
-                //worker's execution
-                [this] {
-                    std::function<void()> task;
-                    //until thread thread pool terminated
-                    while (true) {
-
-                        {
-                            std::unique_lock<std::mutex> lock(mu);
-                            //if task queue is not empty or thread pool has been terminated, continue
-                            //else wait for notifying
-                            while (tasks.empty() && !terminated) {
-                                cond.wait(lock);
-                            }
-                            //if task queue is empty here, thread pool must have been terminated
-                            if (tasks.empty()) {
-                                return;
-                            }
-                            task = std::move(tasks.front());
-                            tasks.pop();
-                        }
-                        task();
-                    }
-                }
-        );
-    }
-}
-
-ThreadPool::~ThreadPool() {
-    {
-        std::unique_lock<std::mutex> lock(mu);
-        terminated = true;
-    }
-    cond.notify_all();
-    for (std::thread &w:workers) {
-        w.join();
-    }
-}
-
-template<class Func, class... Args>
-auto ThreadPool::addTask(Func &&func, Args &&... args) -> std::future<typename std::result_of<Func(Args...)>::type> {
-    //return type of func
-    using retType = typename std::result_of<Func(Args...)>::type;
-    auto task = std::make_shared<std::packaged_task<retType()>>
-            ((std::bind(std::forward<Func>(func), std::forward<Args>(args)...)));
-    //store result of task
-    std::future<retType> ret = task->get_future();
-
-    {
-        std::unique_lock<std::mutex> lock(mu);
-        //package task function to type void()
-        tasks.emplace([task] { (*task)(); });
-    }
-    cond.notify_one();
-    return ret;
-}
-
-
-#endif //SIMPLE_THREADPOOL_H
+#endif //LEVELDB_THREADPOOL_H
